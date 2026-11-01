@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ActivityNotFoundException
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -16,10 +17,12 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.VibrationEffect
 import android.os.VibratorManager
+import android.provider.AlarmClock
 import android.provider.Settings
 import android.service.quicksettings.TileService
 import android.speech.tts.TextToSpeech
 import android.util.Log
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 /**
@@ -50,6 +53,8 @@ class JarvisService : Service() {
         private const val CANAL_GUARDADO = "jarvis_guardado"
         private const val CANAL_GUARDADO_SILENCIO = "jarvis_guardado_silencio"
         private const val ID_CONFIRMACION = 3
+        private const val REINTENTAR = "Di “Oye Jarvis” para intentarlo de nuevo"
+        private val FORMATO_FECHA = DateTimeFormatter.ofPattern("EEEE d 'de' MMMM 'a las' HH:mm", Locale.forLanguageTag("es-CL"))
 
         /** Puntaje mínimo de openWakeWord para cada nivel de sensibilidad. */
         val UMBRALES = mapOf("alta" to 0.1f, "media" to 0.25f, "baja" to 0.5f)
@@ -164,9 +169,9 @@ class JarvisService : Service() {
             comando = Dictado(this, esperaMs(this), object : Dictado.Oyente {
                 override fun listo() {}
                 override fun parcial(texto: String) {}
-                override fun final(texto: String) { guardarComando(texto); terminarComando() }
+                override fun final(texto: String) { ejecutar(texto); terminarComando() }
                 override fun error(codigo: String) {
-                    confirmar(if (codigo == "network") "Sin conexión para entender la idea" else "No te escuché", null, null)
+                    confirmar(if (codigo == "network") "Sin conexión para entenderte" else "No te escuché", REINTENTAR, false)
                     terminarComando()
                 }
             }).also { it.iniciar() }
@@ -178,35 +183,106 @@ class JarvisService : Service() {
         reanudar()
     }
 
-    private fun guardarComando(dicho: String) {
-        val idea = Comando.interpretar(dicho)
-        if (idea.texto.isBlank()) return confirmar("No entendí la idea", null, null)
+    /** Hace lo que se dictó: alarma, temporizador, cronómetro, recordatorio o guardar la idea. */
+    private fun ejecutar(dicho: String) {
+        val accion = Accion.interpretar(dicho, cronometroEnCurso = Cronometro.enCurso(this))
+        Log.d("Jarvis", "accion: ${accion.javaClass.simpleName}")
+        when (accion) {
+            is Accion.Guardar -> guardarIdea(accion.idea)
+            is Accion.Falta -> confirmar(accion.mensaje, REINTENTAR, false)
+            is Accion.Alarma -> {
+                val titulo = "Alarma a las %02d:%02d".format(accion.hora, accion.minuto)
+                val i = Intent(AlarmClock.ACTION_SET_ALARM)
+                    .putExtra(AlarmClock.EXTRA_HOUR, accion.hora)
+                    .putExtra(AlarmClock.EXTRA_MINUTES, accion.minuto)
+                    .putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+                if (accion.etiqueta.isNotEmpty()) i.putExtra(AlarmClock.EXTRA_MESSAGE, accion.etiqueta)
+                if (abrirReloj(i, titulo)) confirmar(titulo, accion.etiqueta.ifEmpty { null }, true)
+            }
+            is Accion.Temporizador -> {
+                val titulo = "Temporizador de ${Cronometro.duracion(accion.segundos.toLong())}"
+                val i = Intent(AlarmClock.ACTION_SET_TIMER)
+                    .putExtra(AlarmClock.EXTRA_LENGTH, accion.segundos)
+                    .putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+                if (accion.etiqueta.isNotEmpty()) i.putExtra(AlarmClock.EXTRA_MESSAGE, accion.etiqueta)
+                if (abrirReloj(i, titulo)) confirmar(titulo, accion.etiqueta.ifEmpty { null }, true)
+            }
+            Accion.CronometroIniciar ->
+                if (Cronometro.enCurso(this)) confirmar("El cronómetro ya está corriendo", null, false)
+                else { Cronometro.iniciar(this); confirmar("Cronómetro iniciado", null, true) }
+            Accion.CronometroDetener -> {
+                val tiempo = Cronometro.detener(this)
+                if (tiempo == null) confirmar("El cronómetro no estaba corriendo", null, false)
+                else confirmar("Cronómetro: $tiempo", null, true)
+            }
+            is Accion.Evento -> crearEvento(accion)
+        }
+    }
+
+    private fun guardarIdea(idea: Comando.Idea) {
+        if (idea.texto.isBlank()) return confirmar("No entendí la idea", REINTENTAR, false)
         val id = ColaIdeas.agregar(this, idea.texto, idea.categoria)
         Log.d("Jarvis", "comando guardado: seccion=${idea.categoria} largo=${idea.texto.length}")
         MainActivity.instancia?.entregarIdeas()
-        confirmar("Guardada en ${Comando.nombre(idea.categoria)}", idea.texto, id)
+        val deshacer = botonDeshacer(id.hashCode(), Intent(this, AccionNotificacion::class.java)
+            .setAction(AccionNotificacion.DESHACER_IDEA).putExtra(AccionNotificacion.EXTRA_ID, id))
+        confirmar("Guardada en ${Comando.nombre(idea.categoria)}", idea.texto, true, deshacer)
     }
 
+    private fun crearEvento(e: Accion.Evento) {
+        val cuando = e.inicio.format(FORMATO_FECHA)
+        val id = try {
+            if (Calendario.tienePermiso(this)) Calendario.crear(this, e.titulo, e.inicio) else null
+        } catch (ex: Exception) {
+            Log.w("Jarvis", "calendario: ${ex.message}"); null
+        }
+        if (id == null) {
+            // Sin permiso o sin calendario no se pierde: queda en la bandeja con su fecha.
+            ColaIdeas.agregar(this, "${e.titulo} ($cuando)", null)
+            MainActivity.instancia?.entregarIdeas()
+            return confirmar("No pude usar el calendario", "Lo dejé en la bandeja. Abre Bandeja para dar el permiso.", false)
+        }
+        val deshacer = botonDeshacer(id.hashCode(), Intent(this, AccionNotificacion::class.java)
+            .setAction(AccionNotificacion.DESHACER_EVENTO).putExtra(AccionNotificacion.EXTRA_ID, id))
+        confirmar("Recordatorio: $cuando", e.titulo, true, deshacer)
+    }
+
+    /** Abre la app Reloj en segundo plano; sin "Aparecer encima", Android lo bloquea y se pide tocar una notificación. */
+    private fun abrirReloj(i: Intent, titulo: String): Boolean {
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        try {
+            if (Settings.canDrawOverlays(this)) { startActivity(i); return true }
+            val pi = PendingIntent.getActivity(this, 4, i, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+            getSystemService(NotificationManager::class.java).notify(ID_AVISO, Notification.Builder(this, CANAL_AVISO)
+                .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+                .setContentTitle(titulo)
+                .setContentText("Toca para confirmar")
+                .setContentIntent(pi)
+                .setAutoCancel(true)
+                .build())
+        } catch (e: ActivityNotFoundException) {
+            confirmar("No encontré la app Reloj", null, false)
+        }
+        return false
+    }
+
+    private fun botonDeshacer(codigo: Int, i: Intent) =
+        PendingIntent.getBroadcast(this, codigo, i, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+
     /** Responde según la opción elegida: notificación con vibración, o voz (con una notificación silenciosa para deshacer). */
-    private fun confirmar(titulo: String, texto: String?, id: String?) {
+    private fun confirmar(titulo: String, texto: String?, exito: Boolean, deshacer: PendingIntent? = null) {
         val porVoz = prefs(this).getString(PREF_RESPUESTA, "notificacion") == "voz"
-        if (porVoz) hablar(if (id != null) "Listo, ${titulo.lowercase()}" else titulo)
-        else vibrar(longArrayOf(0, if (id != null) 120 else 300))
+        if (porVoz) hablar(if (exito) "Listo, ${titulo.replaceFirstChar { it.lowercase() }}" else titulo)
+        else vibrar(longArrayOf(0, if (exito) 120 else 300))
 
         val n = Notification.Builder(this, if (porVoz) CANAL_GUARDADO_SILENCIO else CANAL_GUARDADO)
             .setSmallIcon(android.R.drawable.ic_menu_save)
             .setContentTitle(titulo)
-            .setContentText(texto ?: "Di “Oye Jarvis” para intentarlo de nuevo")
-            .setStyle(Notification.BigTextStyle().bigText(texto ?: "Di “Oye Jarvis” para intentarlo de nuevo"))
             .setContentIntent(PendingIntent.getActivity(this, 3, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE))
             .setAutoCancel(true)
-            .setTimeoutAfter(if (id != null) 60_000 else 8_000)
-        if (id != null) {
-            val deshacer = PendingIntent.getBroadcast(
-                this, id.hashCode(),
-                Intent(this, DeshacerIdea::class.java).putExtra(DeshacerIdea.EXTRA_ID, id),
-                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-            )
+            .setTimeoutAfter(if (deshacer != null) 60_000 else 8_000)
+        if (texto != null) n.setContentText(texto).setStyle(Notification.BigTextStyle().bigText(texto))
+        if (deshacer != null) {
             n.addAction(Notification.Action.Builder(Icon.createWithResource(this, android.R.drawable.ic_menu_revert), "Deshacer", deshacer).build())
         }
         getSystemService(NotificationManager::class.java).notify(ID_CONFIRMACION, n.build())

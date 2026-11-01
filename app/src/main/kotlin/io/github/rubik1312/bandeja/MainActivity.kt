@@ -43,6 +43,7 @@ class MainActivity : Activity() {
         const val REQ_MIC = 1
         const val REQ_ARCHIVO = 2
         const val REQ_JARVIS = 3
+        const val REQ_CALENDARIO = 4
 
         /** La app abierta, para entregarle al instante las ideas que Jarvis guarda por voz. */
         var instancia: MainActivity? = null
@@ -136,6 +137,15 @@ class MainActivity : Activity() {
         if (JarvisService.prefs(this).getBoolean(JarvisService.PREF_ACTIVO, false) &&
             JarvisService.instancia == null && tienePermiso(Manifest.permission.RECORD_AUDIO)
         ) JarvisService.iniciar(this)
+        pedirCalendario()
+    }
+
+    /** Se pide una sola vez, para que "recuérdame mañana…" pueda escribir en el calendario. */
+    private fun pedirCalendario() {
+        val p = JarvisService.prefs(this)
+        if (!p.getBoolean(JarvisService.PREF_ACTIVO, false) || Calendario.tienePermiso(this) || p.getBoolean("calendario_pedido", false)) return
+        p.edit().putBoolean("calendario_pedido", true).apply()
+        requestPermissions(arrayOf(Manifest.permission.READ_CALENDAR, Manifest.permission.WRITE_CALENDAR), REQ_CALENDARIO)
     }
 
     override fun onStop() {

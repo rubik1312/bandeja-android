@@ -10,6 +10,10 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- "Oye Jarvis, pon una alarma… / recuérdame mañana…" -->
+    <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <uses-permission android:name="android.permission.WRITE_CALENDAR" />
     <!-- Respuesta hablada de Jarvis. -->
     <queries>
         <intent>
@@ -66,7 +70,7 @@
             android:foregroundServiceType="microphone" />
 
         <receiver
-            android:name=".DeshacerIdea"
+            android:name=".AccionNotificacion"
             android:exported="false" />
 
         <!-- Botón "Jarvis" en el panel rápido de notificaciones. -->

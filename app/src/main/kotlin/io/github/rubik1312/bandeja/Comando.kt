@@ -84,7 +84,7 @@ object Comando {
         Regex("\\bsortear\\b", RegexOption.IGNORE_CASE) to "sorter",
     )
 
-    private fun corregir(t: String) = CORRECCIONES.fold(t) { acc, (r, por) -> r.replace(acc, por) }
+    fun corregir(t: String) = CORRECCIONES.fold(t) { acc, (r, por) -> r.replace(acc, por) }
 
     private fun seccionDe(palabra: String): String? {
         val p = palabra.trim()
