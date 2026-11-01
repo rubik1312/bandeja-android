@@ -14,8 +14,13 @@ import android.graphics.drawable.Icon
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.VibrationEffect
+import android.os.VibratorManager
 import android.provider.Settings
 import android.service.quicksettings.TileService
+import android.speech.tts.TextToSpeech
+import android.util.Log
+import java.util.Locale
 
 /**
  * Escucha "Jarvis" en segundo plano con openWakeWord (todo en el teléfono, sin internet ni cuentas)
@@ -38,6 +43,13 @@ class JarvisService : Service() {
         const val PREF_PAUSADO = "jarvis_pausado"
         const val PREF_SENSIBILIDAD = "jarvis_sensibilidad"
         const val PREF_ERROR = "jarvis_error"
+        const val PREF_MODO = "jarvis_modo"            // "guardar" (sin abrir la app) o "abrir"
+        const val PREF_RESPUESTA = "jarvis_respuesta"  // "notificacion" o "voz"
+        const val PREF_ESPERA = "dictado_espera"       // segundos de silencio antes de dar por terminada la idea
+
+        private const val CANAL_GUARDADO = "jarvis_guardado"
+        private const val CANAL_GUARDADO_SILENCIO = "jarvis_guardado_silencio"
+        private const val ID_CONFIRMACION = 3
 
         /** Puntaje mínimo de openWakeWord para cada nivel de sensibilidad. */
         val UMBRALES = mapOf("alta" to 0.1f, "media" to 0.25f, "baja" to 0.5f)
@@ -49,6 +61,10 @@ class JarvisService : Service() {
         fun prefs(c: Context): SharedPreferences = c.getSharedPreferences("bandeja", MODE_PRIVATE)
         fun pausado(c: Context) = prefs(c).getBoolean(PREF_PAUSADO, false)
         fun umbral(c: Context) = UMBRALES[prefs(c).getString(PREF_SENSIBILIDAD, "media")] ?: 0.25f
+        fun esperaMs(c: Context) = prefs(c).getInt(PREF_ESPERA, 3) * 1000L
+
+        /** Borra la notificación de "Guardada en…" (la usa el botón Deshacer). */
+        fun quitarConfirmacion(c: Context) = c.getSystemService(NotificationManager::class.java).cancel(ID_CONFIRMACION)
 
         fun iniciar(c: Context) = c.startForegroundService(Intent(c, JarvisService::class.java))
         fun detener(c: Context) = c.stopService(Intent(c, JarvisService::class.java))
@@ -70,6 +86,8 @@ class JarvisService : Service() {
         nm.deleteNotificationChannel("jarvis")
         nm.createNotificationChannel(NotificationChannel(CANAL_ESTADO, "Estado de Jarvis", NotificationManager.IMPORTANCE_LOW))
         nm.createNotificationChannel(NotificationChannel(CANAL_AVISO, "Jarvis te escuchó", NotificationManager.IMPORTANCE_HIGH))
+        nm.createNotificationChannel(NotificationChannel(CANAL_GUARDADO, "Ideas guardadas por voz", NotificationManager.IMPORTANCE_HIGH))
+        nm.createNotificationChannel(NotificationChannel(CANAL_GUARDADO_SILENCIO, "Ideas guardadas (con respuesta hablada)", NotificationManager.IMPORTANCE_LOW))
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -99,7 +117,7 @@ class JarvisService : Service() {
 
     /** Empieza (o vuelve) a escuchar "Jarvis", salvo que el usuario lo haya pausado. */
     fun reanudar() {
-        if (escuchando || pausado(this)) return mostrarEstado()
+        if (escuchando || pausado(this) || comando?.enCurso == true) return mostrarEstado()
         try {
             val d = detector ?: DetectorJarvis(
                 applicationContext,
@@ -129,6 +147,92 @@ class JarvisService : Service() {
 
     private fun escuchado() {
         soltarMicrofono()
+        if (prefs(this).getString(PREF_MODO, "guardar") == "guardar") escucharComando() else abrirApp()
+    }
+
+    // ---------- "Oye Jarvis, guarda en trabajo…" sin abrir la app ----------
+
+    private var comando: Dictado? = null
+    private var tts: TextToSpeech? = null
+    private var ttsListo = false
+    private var fraseEnEspera: String? = null
+
+    private fun escucharComando() {
+        vibrar(longArrayOf(0, 60, 80, 60)) // doble toque: "te escucho, habla"
+        // Pausa breve para que el detector suelte el micrófono antes de que lo tome el dictado.
+        main.postDelayed({
+            comando = Dictado(this, esperaMs(this), object : Dictado.Oyente {
+                override fun listo() {}
+                override fun parcial(texto: String) {}
+                override fun final(texto: String) { guardarComando(texto); terminarComando() }
+                override fun error(codigo: String) {
+                    confirmar(if (codigo == "network") "Sin conexión para entender la idea" else "No te escuché", null, null)
+                    terminarComando()
+                }
+            }).also { it.iniciar() }
+        }, 350)
+    }
+
+    private fun terminarComando() {
+        comando = null
+        reanudar()
+    }
+
+    private fun guardarComando(dicho: String) {
+        val idea = Comando.interpretar(dicho)
+        if (idea.texto.isBlank()) return confirmar("No entendí la idea", null, null)
+        val id = ColaIdeas.agregar(this, idea.texto, idea.categoria)
+        Log.d("Jarvis", "comando guardado: seccion=${idea.categoria} largo=${idea.texto.length}")
+        MainActivity.instancia?.entregarIdeas()
+        confirmar("Guardada en ${Comando.nombre(idea.categoria)}", idea.texto, id)
+    }
+
+    /** Responde según la opción elegida: notificación con vibración, o voz (con una notificación silenciosa para deshacer). */
+    private fun confirmar(titulo: String, texto: String?, id: String?) {
+        val porVoz = prefs(this).getString(PREF_RESPUESTA, "notificacion") == "voz"
+        if (porVoz) hablar(if (id != null) "Listo, ${titulo.lowercase()}" else titulo)
+        else vibrar(longArrayOf(0, if (id != null) 120 else 300))
+
+        val n = Notification.Builder(this, if (porVoz) CANAL_GUARDADO_SILENCIO else CANAL_GUARDADO)
+            .setSmallIcon(android.R.drawable.ic_menu_save)
+            .setContentTitle(titulo)
+            .setContentText(texto ?: "Di “Oye Jarvis” para intentarlo de nuevo")
+            .setStyle(Notification.BigTextStyle().bigText(texto ?: "Di “Oye Jarvis” para intentarlo de nuevo"))
+            .setContentIntent(PendingIntent.getActivity(this, 3, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE))
+            .setAutoCancel(true)
+            .setTimeoutAfter(if (id != null) 60_000 else 8_000)
+        if (id != null) {
+            val deshacer = PendingIntent.getBroadcast(
+                this, id.hashCode(),
+                Intent(this, DeshacerIdea::class.java).putExtra(DeshacerIdea.EXTRA_ID, id),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+            n.addAction(Notification.Action.Builder(Icon.createWithResource(this, android.R.drawable.ic_menu_revert), "Deshacer", deshacer).build())
+        }
+        getSystemService(NotificationManager::class.java).notify(ID_CONFIRMACION, n.build())
+    }
+
+    private fun hablar(frase: String) {
+        if (tts == null) {
+            tts = TextToSpeech(applicationContext) { estado ->
+                ttsListo = estado == TextToSpeech.SUCCESS
+                if (ttsListo) {
+                    val t = tts!!
+                    if (t.setLanguage(Locale.forLanguageTag("es-CL")) < 0 && t.setLanguage(Locale.forLanguageTag("es-ES")) < 0) t.setLanguage(Locale.forLanguageTag("es"))
+                    fraseEnEspera?.let { t.speak(it, TextToSpeech.QUEUE_FLUSH, null, "jarvis") }
+                }
+                fraseEnEspera = null
+            }
+        }
+        if (ttsListo) tts?.speak(frase, TextToSpeech.QUEUE_FLUSH, null, "jarvis") else fraseEnEspera = frase
+    }
+
+    private fun vibrar(patron: LongArray) {
+        val v = getSystemService(VibratorManager::class.java).defaultVibrator
+        v.vibrate(VibrationEffect.createWaveform(patron, -1))
+    }
+
+    private fun abrirApp() {
         val abrir = Intent(this, MainActivity::class.java)
             .setAction(ACCION_JARVIS)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
@@ -181,6 +285,10 @@ class JarvisService : Service() {
 
     override fun onDestroy() {
         main.removeCallbacksAndMessages(null)
+        comando?.cancelar()
+        comando = null
+        tts?.shutdown()
+        tts = null
         detector?.cerrar()
         detector = null
         escuchando = false

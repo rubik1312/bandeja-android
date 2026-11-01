@@ -43,15 +43,20 @@ class MainActivity : Activity() {
         const val REQ_MIC = 1
         const val REQ_ARCHIVO = 2
         const val REQ_JARVIS = 3
+
+        /** La app abierta, para entregarle al instante las ideas que Jarvis guarda por voz. */
+        var instancia: MainActivity? = null
+            private set
     }
 
     private lateinit var web: WebView
-    private var recognizer: SpeechRecognizer? = null
+    private var dictado: Dictado? = null
     private var vozPendiente = false
     private var archivoCallback: ValueCallback<Array<Uri>>? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        instancia = this
         web = WebView(this)
         // El WebView ignora su propio padding, así que el espacio para las barras va en un contenedor.
         val raiz = FrameLayout(this).apply { addView(web) }
@@ -135,7 +140,7 @@ class MainActivity : Activity() {
 
     override fun onStop() {
         super.onStop()
-        recognizer?.cancel()
+        dictado?.cancelar()
         JarvisService.instancia?.reanudar()
     }
 
@@ -158,15 +163,13 @@ class MainActivity : Activity() {
     }
 
     private fun escuchar() {
-        recognizer?.destroy()
-        recognizer = SpeechRecognizer.createSpeechRecognizer(this).apply {
-            setRecognitionListener(Oyente())
-            startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "es-CL")
-                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            })
-        }
+        dictado?.cancelar()
+        dictado = Dictado(this, JarvisService.esperaMs(this), object : Dictado.Oyente {
+            override fun listo() = avisarVoz("listo")
+            override fun parcial(texto: String) = avisarVoz("parcial", texto)
+            override fun final(texto: String) = avisarVoz("final", texto)
+            override fun error(codigo: String) = avisarVoz("error", codigo)
+        }).also { it.iniciar() }
     }
 
     /** Avisa a la web: window.bandejaVoz(evento, texto). Eventos: listo, parcial, final, error. */
@@ -177,26 +180,9 @@ class MainActivity : Activity() {
         )
     }
 
-    private inner class Oyente : RecognitionListener {
-        private fun primero(b: Bundle?) =
-            b?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
-
-        override fun onReadyForSpeech(params: Bundle?) = avisarVoz("listo")
-        override fun onPartialResults(partialResults: Bundle?) = avisarVoz("parcial", primero(partialResults))
-        override fun onResults(results: Bundle?) = avisarVoz("final", primero(results))
-        override fun onError(error: Int) = avisarVoz(
-            "error", when (error) {
-                SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "no-speech"
-                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "not-allowed"
-                SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "network"
-                else -> "error-$error"
-            }
-        )
-        override fun onBeginningOfSpeech() {}
-        override fun onRmsChanged(rmsdB: Float) {}
-        override fun onBufferReceived(buffer: ByteArray?) {}
-        override fun onEndOfSpeech() {}
-        override fun onEvent(eventType: Int, params: Bundle?) {}
+    /** Avisa a la web que hay ideas nuevas guardadas por voz (o ideas que deshacer). */
+    fun entregarIdeas() = runOnUiThread {
+        web.evaluateJavascript("window.bandejaNuevasIdeas && window.bandejaNuevasIdeas()", null)
     }
 
     // ---------- puente que ve la web como window.BandejaNativa ----------
@@ -209,7 +195,26 @@ class MainActivity : Activity() {
         fun iniciarVoz() = runOnUiThread { this@MainActivity.iniciarVoz() }
 
         @JavascriptInterface
-        fun detenerVoz() = runOnUiThread { recognizer?.stopListening() }
+        fun detenerVoz() = runOnUiThread { dictado?.detener() }
+
+        @JavascriptInterface
+        fun tomarIdeas(): String = ColaIdeas.tomarIdeas(this@MainActivity)
+
+        @JavascriptInterface
+        fun tomarBorrados(): String = ColaIdeas.tomarBorrados(this@MainActivity)
+
+        /** Opciones de Jarvis: modo (guardar/abrir), respuesta (notificacion/voz), espera (segundos de silencio). */
+        @JavascriptInterface
+        fun configurarJarvis(opcion: String, valor: String) = runOnUiThread {
+            val e = JarvisService.prefs(this@MainActivity).edit()
+            when (opcion) {
+                "modo" -> if (valor in setOf("guardar", "abrir")) e.putString(JarvisService.PREF_MODO, valor)
+                "respuesta" -> if (valor in setOf("notificacion", "voz")) e.putString(JarvisService.PREF_RESPUESTA, valor)
+                "espera" -> valor.toIntOrNull()?.takeIf { it in 1..10 }?.let { e.putInt(JarvisService.PREF_ESPERA, it) }
+            }
+            e.apply()
+            avisarJarvis()
+        }
 
         @JavascriptInterface
         fun guardarArchivo(nombre: String, contenido: String) = runOnUiThread { guardarEnDescargas(nombre, contenido) }
@@ -274,6 +279,9 @@ class MainActivity : Activity() {
         put("motor", "oww")
         put("pausado", p.getBoolean(JarvisService.PREF_PAUSADO, false))
         put("sensibilidad", p.getString(JarvisService.PREF_SENSIBILIDAD, "media"))
+        put("modo", p.getString(JarvisService.PREF_MODO, "guardar"))
+        put("respuesta", p.getString(JarvisService.PREF_RESPUESTA, "notificacion"))
+        put("espera", p.getInt(JarvisService.PREF_ESPERA, 3))
         put("encima", Settings.canDrawOverlays(this@MainActivity))
         put("bateria", getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName))
         put("error", p.getString(JarvisService.PREF_ERROR, "") ?: "")
@@ -369,7 +377,8 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
-        recognizer?.destroy()
+        dictado?.cancelar()
+        if (instancia === this) instancia = null
         web.destroy()
         super.onDestroy()
     }
