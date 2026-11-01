@@ -93,7 +93,11 @@ class DetectorJarvis(
     fun cerrar() {
         detener()
         mel.close(); emb.close(); ww.close()
+        oido?.close()
+        oido = null
     }
+
+    private var oido: OidoEspanol? = null
 
     @SuppressLint("MissingPermission") // el servicio solo arranca con el permiso de micrófono concedido
     private fun escuchar() {
@@ -109,6 +113,10 @@ class DetectorJarvis(
         }
         val pcm = ShortArray(TROZO)
         val audio = FloatArray(TROZO)
+        // Vosk tarda unos segundos en cargar (la primera vez copia el modelo), por eso se carga aquí y no en el hilo principal.
+        if (oido == null) oido = try { OidoEspanol(context) } catch (e: Exception) {
+            Log.w("Jarvis", "Vosk no disponible: ${e.message}"); null
+        }
         try {
             while (activo) {
                 var leidas = 0
@@ -122,8 +130,10 @@ class DetectorJarvis(
                 val p = puntaje(audio)
                 diagnostico(p)
                 if (p >= 0.02f) Log.d("Jarvis", "pico=%.3f rms=%.0f umbral=%.2f".format(p, ultimoRms, umbral))
+                val oyoEspanol = oido?.escuchar(pcm, ultimoRms >= SILENCIO_RMS) == true
+                if (oyoEspanol) Log.d("Jarvis", "vosk oyó jarvis")
                 if (enfriamiento > 0) enfriamiento--
-                else if (p >= umbral) { enfriamiento = ENFRIAMIENTO; alOir() }
+                else if (p >= umbral || oyoEspanol) { enfriamiento = ENFRIAMIENTO; alOir() }
             }
         } finally {
             rec.stop()

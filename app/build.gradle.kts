@@ -14,6 +14,8 @@ val firma = Properties().apply {
 dependencies {
     // Motor para "Oye Jarvis" (modelos de openWakeWord en assets/oww).
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.31.1")
+    // Reconocimiento en español para "jarvis" pronunciado con J española (modelo en assets/vosk-es).
+    implementation("com.alphacephei:vosk-android:0.3.75")
 }
 
 android {
@@ -25,8 +27,8 @@ android {
         minSdk = 30
         targetSdk = 37
         // Sube versionCode en cada versión nativa nueva y publícala con el tag "v<versionCode>".
-        versionCode = 5
-        versionName = "1.4"
+        versionCode = 6
+        versionName = "1.5"
         // Solo celulares de 64 bits (como el S22): el motor de voz pesa mucho por cada arquitectura.
         ndk { abiFilters += "arm64-v8a" }
     }
