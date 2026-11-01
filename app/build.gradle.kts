@@ -11,6 +11,10 @@ val firma = Properties().apply {
     if (f.exists()) f.inputStream().use { load(it) }
 }
 
+dependencies {
+    implementation("ai.picovoice:porcupine-android:4.0.2")
+}
+
 android {
     namespace = "io.github.rubik1312.bandeja"
     compileSdk = 37
@@ -20,8 +24,8 @@ android {
         minSdk = 30
         targetSdk = 37
         // Sube versionCode en cada versión nativa nueva y publícala con el tag "v<versionCode>".
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
     }
 
     signingConfigs {

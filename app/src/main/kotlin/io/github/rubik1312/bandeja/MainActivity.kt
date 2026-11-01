@@ -3,13 +3,16 @@ package io.github.rubik1312.bandeja
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
+import android.app.KeyguardManager
 import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
+import android.os.PowerManager
 import android.provider.MediaStore
+import android.provider.Settings
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -38,6 +41,7 @@ class MainActivity : Activity() {
         const val RELEASES_URL = "https://api.github.com/repos/rubik1312/bandeja-android/releases/latest"
         const val REQ_MIC = 1
         const val REQ_ARCHIVO = 2
+        const val REQ_JARVIS = 3
     }
 
     private lateinit var web: WebView
@@ -93,6 +97,7 @@ class MainActivity : Activity() {
 
         if (savedInstanceState != null) web.restoreState(savedInstanceState)
         else web.loadUrl(if (pideVoz(intent)) "$APP_URL?voz=1" else APP_URL)
+        if (pideVoz(intent)) despertarPantalla()
 
         buscarActualizacion()
     }
@@ -100,21 +105,56 @@ class MainActivity : Activity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        if (pideVoz(intent)) web.evaluateJavascript("window.bandejaIniciarVoz && window.bandejaIniciarVoz()", null)
+        if (pideVoz(intent)) {
+            despertarPantalla()
+            web.evaluateJavascript("window.bandejaIniciarVoz && window.bandejaIniciarVoz()", null)
+        }
     }
 
-    /** Se abrió desde "Dictar idea" (botón lateral) o como asistente digital. */
+    /** Se abrió desde "Dictar idea" (botón lateral), como asistente digital o con "Oye Jarvis". */
     private fun pideVoz(i: Intent?): Boolean =
-        i?.action == Intent.ACTION_ASSIST || i?.component?.className?.endsWith(".DictarIdea") == true
+        i?.action == Intent.ACTION_ASSIST || i?.action == JarvisService.ACCION_JARVIS ||
+            i?.component?.className?.endsWith(".DictarIdea") == true
+
+    /** Enciende la pantalla y pide desbloquear (huella o rostro) para no mostrar las ideas con el teléfono bloqueado. */
+    private fun despertarPantalla() {
+        setTurnScreenOn(true)
+        getSystemService(KeyguardManager::class.java).requestDismissKeyguard(this, null)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Android corta la escucha al reiniciar el teléfono; abrir Bandeja la reactiva.
+        if (JarvisService.prefs(this).getBoolean(JarvisService.PREF_ACTIVO, false) &&
+            JarvisService.instancia == null && tienePermiso(Manifest.permission.RECORD_AUDIO)
+        ) JarvisService.iniciar(this)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        recognizer?.cancel()
+        JarvisService.instancia?.reanudar()
+    }
+
+    private fun tienePermiso(p: String) = checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED
 
     // ---------- voz nativa ----------
 
     private fun iniciarVoz() {
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+        if (!tienePermiso(Manifest.permission.RECORD_AUDIO)) {
             vozPendiente = true
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQ_MIC)
             return
         }
+        val jarvis = JarvisService.instancia
+        if (jarvis != null) {
+            // Jarvis y el dictado no pueden usar el micrófono a la vez.
+            jarvis.pausar()
+            web.postDelayed({ escuchar() }, 300)
+        } else escuchar()
+    }
+
+    private fun escuchar() {
         recognizer?.destroy()
         recognizer = SpeechRecognizer.createSpeechRecognizer(this).apply {
             setRecognitionListener(Oyente())
@@ -173,6 +213,51 @@ class MainActivity : Activity() {
 
         @JavascriptInterface
         fun version(): Long = versionCode()
+
+        @JavascriptInterface
+        fun jarvisEstado(): String = estadoJarvis().toString()
+
+        @JavascriptInterface
+        fun activarJarvis(clave: String) = runOnUiThread {
+            if (clave.isNotBlank()) JarvisService.prefs(this@MainActivity).edit()
+                .putString(JarvisService.PREF_CLAVE, clave.trim()).apply()
+            JarvisService.prefs(this@MainActivity).edit().putBoolean(JarvisService.PREF_ACTIVO, true).apply()
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS), REQ_JARVIS)
+        }
+
+        @JavascriptInterface
+        fun desactivarJarvis() = runOnUiThread {
+            JarvisService.prefs(this@MainActivity).edit().putBoolean(JarvisService.PREF_ACTIVO, false).apply()
+            JarvisService.detener(this@MainActivity)
+            web.postDelayed({ avisarJarvis() }, 300)
+        }
+
+        @JavascriptInterface
+        fun abrirPermisoEncima() = runOnUiThread {
+            startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+        }
+
+        @JavascriptInterface
+        fun abrirBateria() = runOnUiThread {
+            startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+        }
+    }
+
+    // ---------- Jarvis ----------
+
+    private fun estadoJarvis() = JSONObject().apply {
+        val p = JarvisService.prefs(this@MainActivity)
+        put("activo", p.getBoolean(JarvisService.PREF_ACTIVO, false))
+        put("escuchando", JarvisService.instancia != null)
+        put("tieneClave", !p.getString(JarvisService.PREF_CLAVE, "").isNullOrBlank())
+        put("encima", Settings.canDrawOverlays(this@MainActivity))
+        put("bateria", getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName))
+        put("error", p.getString(JarvisService.PREF_ERROR, "") ?: "")
+    }
+
+    /** Avisa a la web: window.bandejaJarvis(estado). */
+    private fun avisarJarvis() {
+        web.evaluateJavascript("window.bandejaJarvis && window.bandejaJarvis(${estadoJarvis()})", null)
     }
 
     private fun guardarEnDescargas(nombre: String, contenido: String) {
@@ -232,6 +317,13 @@ class MainActivity : Activity() {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_JARVIS) {
+            if (tienePermiso(Manifest.permission.RECORD_AUDIO)) JarvisService.iniciar(this)
+            else JarvisService.prefs(this).edit().putString(JarvisService.PREF_ERROR, "Falta permiso de micrófono").apply()
+            // Porcupine tarda un momento en validar la clave; luego se informa el resultado a la web.
+            web.postDelayed({ avisarJarvis() }, 1500)
+            return
+        }
         if (requestCode != REQ_MIC) return
         val ok = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
         if (ok && vozPendiente) iniciarVoz() else if (!ok) avisarVoz("error", "not-allowed")
