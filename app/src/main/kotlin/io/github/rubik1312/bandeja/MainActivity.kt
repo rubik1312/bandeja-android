@@ -220,6 +220,12 @@ class MainActivity : Activity() {
         fun detenerVoz() = runOnUiThread { dictado?.detener() }
 
         @JavascriptInterface
+        fun proximosEventos(): String = Calendario.proximos(this@MainActivity)
+
+        @JavascriptInterface
+        fun abrirEvento(id: Long): Boolean = Calendario.abrirEvento(this@MainActivity, id)
+
+        @JavascriptInterface
         fun appsInstaladas(): String = Aplicaciones.instaladas(this@MainActivity)
 
         @JavascriptInterface

@@ -1,13 +1,20 @@
 package io.github.rubik1312.bandeja
 
 import android.Manifest
+import android.content.ActivityNotFoundException
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.provider.CalendarContract
+import org.json.JSONArray
+import org.json.JSONObject
+import java.time.Instant
+import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZoneId
+import java.time.ZoneOffset
 import java.util.TimeZone
 
 /** Crea recordatorios en el calendario del teléfono, con aviso a la hora del evento. */
@@ -38,6 +45,57 @@ object Calendario {
             put(CalendarContract.Reminders.METHOD, CalendarContract.Reminders.METHOD_ALERT)
         })
         return id
+    }
+
+    /** Lo que viene en los próximos días, para "Próximo": [{id, titulo, inicio, todoElDia}], lo más cercano primero. */
+    fun proximos(c: Context, cuantos: Int = 5, dias: Long = 7): String {
+        if (!tienePermiso(c)) return "[]"
+        val ahora = System.currentTimeMillis()
+        val uri = CalendarContract.Instances.CONTENT_URI.buildUpon().also {
+            ContentUris.appendId(it, ahora)
+            ContentUris.appendId(it, ahora + dias * 24 * 60 * 60 * 1000)
+        }.build()
+        val columnas = arrayOf(
+            CalendarContract.Instances.EVENT_ID,
+            CalendarContract.Instances.TITLE,
+            CalendarContract.Instances.BEGIN,
+            CalendarContract.Instances.END,
+            CalendarContract.Instances.ALL_DAY,
+            CalendarContract.Instances.CALENDAR_ACCESS_LEVEL,
+        )
+        val hoy = LocalDate.now()
+        val zona = ZoneId.systemDefault()
+        class Fila(val id: Long, val titulo: String, val inicio: LocalDateTime, val todoElDia: Boolean)
+        val filas = mutableListOf<Fila>()
+        c.contentResolver.query(uri, columnas, "${CalendarContract.Instances.VISIBLE}=1", null, null)?.use { f ->
+            while (f.moveToNext()) {
+                val todoElDia = f.getInt(4) == 1
+                val inicio: LocalDateTime
+                if (todoElDia) {
+                    // Feriados y cumpleaños vienen de calendarios de solo lectura: serían puro ruido aquí.
+                    if (f.getInt(5) < CalendarContract.Calendars.CAL_ACCESS_CONTRIBUTOR) continue
+                    // Los eventos de todo el día se guardan en UTC, sin importar la zona horaria.
+                    val fin = Instant.ofEpochMilli(f.getLong(3)).atZone(ZoneOffset.UTC).toLocalDate()
+                    if (!fin.isAfter(hoy)) continue
+                    inicio = Instant.ofEpochMilli(f.getLong(2)).atZone(ZoneOffset.UTC).toLocalDate().atStartOfDay()
+                } else {
+                    if (f.getLong(3) <= ahora) continue
+                    inicio = Instant.ofEpochMilli(f.getLong(2)).atZone(zona).toLocalDateTime()
+                }
+                filas += Fila(f.getLong(0), f.getString(1).orEmpty().ifBlank { "(Sin título)" }, inicio, todoElDia)
+            }
+        }
+        return JSONArray(filas.sortedBy { it.inicio }.take(cuantos).map {
+            JSONObject().put("id", it.id).put("titulo", it.titulo).put("inicio", it.inicio.toString()).put("todoElDia", it.todoElDia)
+        }).toString()
+    }
+
+    /** Abre el evento en la app de calendario. */
+    fun abrirEvento(c: Context, id: Long): Boolean = try {
+        c.startActivity(Intent(Intent.ACTION_VIEW, ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, id)))
+        true
+    } catch (e: ActivityNotFoundException) {
+        false
     }
 
     fun borrar(c: Context, id: Long) {
