@@ -8,6 +8,7 @@ import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.os.PowerManager
@@ -17,6 +18,7 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.view.WindowInsets
+import android.window.OnBackInvokedDispatcher
 import android.webkit.JavascriptInterface
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
@@ -107,6 +109,16 @@ class MainActivity : Activity() {
         if (savedInstanceState != null) web.restoreState(savedInstanceState)
         else web.loadUrl(if (pideVoz(intent)) "$APP_URL?voz=1" else APP_URL)
         if (pideVoz(intent)) despertarPantalla()
+
+        // Atrás primero cierra lo que esté abierto en la web (panel, Ajustes); si no hay nada, sale.
+        // Desde Android 16 ya no llega onBackPressed, por eso se registra este aviso.
+        if (Build.VERSION.SDK_INT >= 33) {
+            onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT) {
+                web.evaluateJavascript("!!(window.bandejaAtras && window.bandejaAtras())") { cerrado ->
+                    if (cerrado != "true") moveTaskToBack(true)
+                }
+            }
+        }
 
         buscarActualizacion()
     }
@@ -206,6 +218,18 @@ class MainActivity : Activity() {
 
         @JavascriptInterface
         fun detenerVoz() = runOnUiThread { dictado?.detener() }
+
+        @JavascriptInterface
+        fun appsInstaladas(): String = Aplicaciones.instaladas(this@MainActivity)
+
+        @JavascriptInterface
+        fun appsSugeridas(): String = Aplicaciones.sugeridas(this@MainActivity)
+
+        @JavascriptInterface
+        fun iconoApp(paquete: String): String = Aplicaciones.icono(this@MainActivity, paquete)
+
+        @JavascriptInterface
+        fun abrirApp(paquete: String): Boolean = Aplicaciones.abrir(this@MainActivity, paquete)
 
         @JavascriptInterface
         fun tomarIdeas(): String = ColaIdeas.tomarIdeas(this@MainActivity)

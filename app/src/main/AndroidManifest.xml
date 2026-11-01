@@ -21,6 +21,14 @@
         </intent>
     </queries>
 
+    <!-- Panel lateral: ver y abrir las apps que se pueden abrir desde el inicio del teléfono. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+
     <!-- Necesario desde Android 11 para encontrar el reconocimiento de voz del teléfono. -->
     <queries>
         <intent>
