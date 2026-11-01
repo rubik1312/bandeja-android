@@ -12,7 +12,8 @@ val firma = Properties().apply {
 }
 
 dependencies {
-    implementation("ai.picovoice:porcupine-android:4.0.2")
+    // Motor para "Oye Jarvis" (modelos de openWakeWord en assets/oww).
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.31.1")
 }
 
 android {
@@ -24,8 +25,10 @@ android {
         minSdk = 30
         targetSdk = 37
         // Sube versionCode en cada versión nativa nueva y publícala con el tag "v<versionCode>".
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 4
+        versionName = "1.3"
+        // Solo celulares de 64 bits (como el S22): el motor de voz pesa mucho por cada arquitectura.
+        ndk { abiFilters += "arm64-v8a" }
     }
 
     signingConfigs {

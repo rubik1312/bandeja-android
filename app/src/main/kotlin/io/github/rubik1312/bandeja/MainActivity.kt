@@ -23,6 +23,7 @@ import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import android.widget.Toast
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -52,10 +53,12 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         web = WebView(this)
-        setContentView(web)
+        // El WebView ignora su propio padding, así que el espacio para las barras va en un contenedor.
+        val raiz = FrameLayout(this).apply { addView(web) }
+        setContentView(raiz)
 
         // Android dibuja la app detrás de las barras del sistema; se deja espacio para ellas y el teclado.
-        web.setOnApplyWindowInsetsListener { v, insets ->
+        raiz.setOnApplyWindowInsetsListener { v, insets ->
             val b = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.ime())
             v.setPadding(b.left, b.top, b.right, b.bottom)
             WindowInsets.CONSUMED
@@ -218,9 +221,8 @@ class MainActivity : Activity() {
         fun jarvisEstado(): String = estadoJarvis().toString()
 
         @JavascriptInterface
-        fun activarJarvis(clave: String) = runOnUiThread {
-            if (clave.isNotBlank()) JarvisService.prefs(this@MainActivity).edit()
-                .putString(JarvisService.PREF_CLAVE, clave.trim()).apply()
+        fun activarJarvis(@Suppress("UNUSED_PARAMETER") clave: String) = runOnUiThread {
+            // El parámetro queda por compatibilidad con la web; openWakeWord no necesita clave.
             JarvisService.prefs(this@MainActivity).edit().putBoolean(JarvisService.PREF_ACTIVO, true).apply()
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS), REQ_JARVIS)
         }
@@ -249,7 +251,8 @@ class MainActivity : Activity() {
         val p = JarvisService.prefs(this@MainActivity)
         put("activo", p.getBoolean(JarvisService.PREF_ACTIVO, false))
         put("escuchando", JarvisService.instancia != null)
-        put("tieneClave", !p.getString(JarvisService.PREF_CLAVE, "").isNullOrBlank())
+        put("tieneClave", true)
+        put("motor", "oww")
         put("encima", Settings.canDrawOverlays(this@MainActivity))
         put("bateria", getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName))
         put("error", p.getString(JarvisService.PREF_ERROR, "") ?: "")
@@ -320,7 +323,7 @@ class MainActivity : Activity() {
         if (requestCode == REQ_JARVIS) {
             if (tienePermiso(Manifest.permission.RECORD_AUDIO)) JarvisService.iniciar(this)
             else JarvisService.prefs(this).edit().putString(JarvisService.PREF_ERROR, "Falta permiso de micrófono").apply()
-            // Porcupine tarda un momento en validar la clave; luego se informa el resultado a la web.
+            // El detector tarda un momento en cargar los modelos; luego se informa el resultado a la web.
             web.postDelayed({ avisarJarvis() }, 1500)
             return
         }

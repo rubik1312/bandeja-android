@@ -1,8 +1,5 @@
 package io.github.rubik1312.bandeja
 
-import ai.picovoice.porcupine.Porcupine
-import ai.picovoice.porcupine.PorcupineException
-import ai.picovoice.porcupine.PorcupineManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -18,7 +15,7 @@ import android.os.Looper
 import android.provider.Settings
 
 /**
- * Escucha "Jarvis" en segundo plano con Porcupine (todo en el teléfono, sin internet)
+ * Escucha "Jarvis" en segundo plano con openWakeWord (todo en el teléfono, sin internet ni cuentas)
  * y abre Bandeja en modo dictado. Mientras corre, Android muestra una notificación fija.
  */
 class JarvisService : Service() {
@@ -30,7 +27,6 @@ class JarvisService : Service() {
         private const val ID_ESCUCHA = 1
         private const val ID_AVISO = 2
 
-        const val PREF_CLAVE = "picovoice_key"
         const val PREF_ACTIVO = "jarvis_activo"
         const val PREF_ERROR = "jarvis_error"
 
@@ -44,7 +40,8 @@ class JarvisService : Service() {
         fun detener(c: Context) = c.stopService(Intent(c, JarvisService::class.java))
     }
 
-    private var porcupine: PorcupineManager? = null
+    private var detector: DetectorJarvis? = null
+    private var escuchando = false
     private val main = Handler(Looper.getMainLooper())
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -71,30 +68,25 @@ class JarvisService : Service() {
 
     /** Empieza (o vuelve) a escuchar "Jarvis". */
     fun reanudar() {
-        if (porcupine != null) return
-        val clave = prefs(this).getString(PREF_CLAVE, "").orEmpty()
-        if (clave.isBlank()) return fallar("Falta la clave de Picovoice")
+        if (escuchando) return
         try {
-            porcupine = PorcupineManager.Builder()
-                .setAccessKey(clave)
-                .setKeyword(Porcupine.BuiltInKeyword.JARVIS)
-                .setSensitivity(0.6f)
-                .setErrorCallback { e -> main.post { fallar(e.message ?: "Error del micrófono") } }
-                .build(applicationContext) { main.post { escuchado() } }
-            porcupine!!.start()
+            val d = detector ?: DetectorJarvis(
+                applicationContext,
+                alOir = { main.post { escuchado() } },
+                alFallar = { msg -> main.post { fallar(msg) } }
+            ).also { detector = it }
+            d.iniciar()
+            escuchando = true
             prefs(this).edit().remove(PREF_ERROR).apply()
-        } catch (e: PorcupineException) {
-            porcupine?.delete()
-            porcupine = null
-            fallar(e.message ?: e.javaClass.simpleName)
+        } catch (e: Exception) {
+            fallar("No pude cargar el detector: ${e.message ?: e.javaClass.simpleName}")
         }
     }
 
     /** Suelta el micrófono para que el dictado lo pueda usar. */
     fun pausar() {
-        try { porcupine?.stop() } catch (_: PorcupineException) {}
-        porcupine?.delete()
-        porcupine = null
+        detector?.detener()
+        escuchando = false
     }
 
     private fun escuchado() {
@@ -141,7 +133,9 @@ class JarvisService : Service() {
 
     override fun onDestroy() {
         main.removeCallbacksAndMessages(null)
-        pausar()
+        detector?.cerrar()
+        detector = null
+        escuchando = false
         instancia = null
         super.onDestroy()
     }
