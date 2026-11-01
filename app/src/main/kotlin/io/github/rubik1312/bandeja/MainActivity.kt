@@ -152,7 +152,7 @@ class MainActivity : Activity() {
         val jarvis = JarvisService.instancia
         if (jarvis != null) {
             // Jarvis y el dictado no pueden usar el micrófono a la vez.
-            jarvis.pausar()
+            jarvis.soltarMicrofono()
             web.postDelayed({ escuchar() }, 300)
         } else escuchar()
     }
@@ -223,7 +223,10 @@ class MainActivity : Activity() {
         @JavascriptInterface
         fun activarJarvis(@Suppress("UNUSED_PARAMETER") clave: String) = runOnUiThread {
             // El parámetro queda por compatibilidad con la web; openWakeWord no necesita clave.
-            JarvisService.prefs(this@MainActivity).edit().putBoolean(JarvisService.PREF_ACTIVO, true).apply()
+            JarvisService.prefs(this@MainActivity).edit()
+                .putBoolean(JarvisService.PREF_ACTIVO, true)
+                .putBoolean(JarvisService.PREF_PAUSADO, false)
+                .apply()
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS), REQ_JARVIS)
         }
 
@@ -232,6 +235,22 @@ class MainActivity : Activity() {
             JarvisService.prefs(this@MainActivity).edit().putBoolean(JarvisService.PREF_ACTIVO, false).apply()
             JarvisService.detener(this@MainActivity)
             web.postDelayed({ avisarJarvis() }, 300)
+        }
+
+        @JavascriptInterface
+        fun pausarJarvis(pausar: Boolean) = runOnUiThread {
+            val s = JarvisService.instancia
+            if (s != null) s.cambiarPausa(pausar)
+            else JarvisService.prefs(this@MainActivity).edit().putBoolean(JarvisService.PREF_PAUSADO, pausar).apply()
+            avisarJarvis()
+        }
+
+        @JavascriptInterface
+        fun sensibilidadJarvis(nivel: String) = runOnUiThread {
+            if (nivel !in JarvisService.UMBRALES) return@runOnUiThread
+            JarvisService.prefs(this@MainActivity).edit().putString(JarvisService.PREF_SENSIBILIDAD, nivel).apply()
+            JarvisService.instancia?.aplicarSensibilidad()
+            avisarJarvis()
         }
 
         @JavascriptInterface
@@ -253,6 +272,8 @@ class MainActivity : Activity() {
         put("escuchando", JarvisService.instancia != null)
         put("tieneClave", true)
         put("motor", "oww")
+        put("pausado", p.getBoolean(JarvisService.PREF_PAUSADO, false))
+        put("sensibilidad", p.getString(JarvisService.PREF_SENSIBILIDAD, "media"))
         put("encima", Settings.canDrawOverlays(this@MainActivity))
         put("bateria", getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName))
         put("error", p.getString(JarvisService.PREF_ERROR, "") ?: "")

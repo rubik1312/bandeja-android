@@ -25,8 +25,8 @@ android {
         minSdk = 30
         targetSdk = 37
         // Sube versionCode en cada versión nativa nueva y publícala con el tag "v<versionCode>".
-        versionCode = 4
-        versionName = "1.3"
+        versionCode = 5
+        versionName = "1.4"
         // Solo celulares de 64 bits (como el S22): el motor de voz pesa mucho por cada arquitectura.
         ndk { abiFilters += "arm64-v8a" }
     }

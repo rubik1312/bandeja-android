@@ -18,7 +18,7 @@ import java.util.Random
  */
 class DetectorJarvis(
     private val context: Context,
-    private val umbral: Float = 0.4f,
+    @Volatile var umbral: Float = 0.25f,
     private val alOir: () -> Unit,
     private val alFallar: (String) -> Unit
 ) {
@@ -121,6 +121,7 @@ class DetectorJarvis(
                 for (i in 0 until TROZO) audio[i] = pcm[i].toFloat()
                 val p = puntaje(audio)
                 diagnostico(p)
+                if (p >= 0.02f) Log.d("Jarvis", "pico=%.3f rms=%.0f umbral=%.2f".format(p, ultimoRms, umbral))
                 if (enfriamiento > 0) enfriamiento--
                 else if (p >= umbral) { enfriamiento = ENFRIAMIENTO; alOir() }
             }
