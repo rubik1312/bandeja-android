@@ -1,0 +1,2 @@
+# Modelos de voz: que git nunca cambie sus saltos de línea (se corromperían al clonar en Windows).
+app/src/main/assets/** binary
